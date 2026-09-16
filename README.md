@@ -346,7 +346,9 @@ Output goes to `synthesized/<category>/` and a separate
 `synthesized_images` list in `manifest.json` - **never mixed into**
 `images`/`reference_pack`/`lora_dataset`, and clearly labeled "AI-recreated"
 in `report.html`. Real and synthesized content should never be
-indistinguishable in the output.
+indistinguishable in the output. Base images are resized to 512px on their
+longer side before synthesis, matching SD1.5's native training resolution
+(see the note below on why).
 
 Flags:
 * `--synthesis-count N` - images per missing category (default: 1)
@@ -356,6 +358,14 @@ Flags:
 * `--synthesis-max-categories N` - cap on how many missing categories to
   synthesize per run, to bound CPU time on videos with many gaps (default: 6)
 * `--face-restore` - apply the optional GFPGAN pass
+
+**Working resolution note.** FRPM's face crops are 1024x1024, but SD1.5
+was trained at 512x512. Running img2img directly at 1024x1024 was tested
+on a real identity pack and verified to produce a visible duplicate/ghost
+face artifact at the frame edge (a well-known SD1.5 failure mode above its
+native resolution) *and* ~5x slower CPU inference for no quality benefit.
+Base images are therefore always downscaled to 512px (longer side) before
+synthesis - fixing both the artifact and the slowdown in that same test.
 
 **Known limitation - pose changes are a nudge, not a guarantee.** This
 uses text-prompt guidance only, with no pose/skeleton conditioning

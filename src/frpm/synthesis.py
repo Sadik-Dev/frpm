@@ -132,7 +132,8 @@ DEFAULT_NEGATIVE_PROMPT = (
     "deformed, disfigured, mutated, extra limbs, extra fingers, bad anatomy, "
     "blurry, low quality, worst quality, jpeg artifacts, watermark, text, logo, "
     "full body, wide shot, nsfw, nude, lingerie, swimsuit, revealing clothing, "
-    "suggestive pose, multiple people, different person"
+    "suggestive pose, multiple people, different person, duplicate face, "
+    "cloned face, two faces, extra face, disembodied face"
 )
 
 # Explicitly anchors framing (head-and-shoulders portrait) on every prompt -
@@ -142,6 +143,34 @@ REALISM_SUFFIX = (
     "head and shoulders portrait photo, close-up, face clearly visible, "
     "photorealistic, natural lighting, sharp focus, realistic skin texture"
 )
+
+# SD1.5's UNet was trained at 512x512 and reliably produces a single
+# coherent subject only near that resolution. Running img2img directly at
+# FRPM's 1024x1024 face-crop resolution was verified to produce a visible
+# "duplicate/ghost face" artifact at the frame edge (a well-known SD1.5
+# failure mode above its native training resolution) *and* roughly 4x
+# slower CPU inference for no quality benefit. Base images are therefore
+# always downscaled to this working resolution before synthesis; the
+# output is saved at this size rather than upscaled back (which would just
+# add blur) - use --face-restore (GFPGAN) if a larger output is wanted, via
+# its own upscale capability.
+SYNTHESIS_WORKING_RESOLUTION = 512
+
+
+def resize_for_synthesis(image, target: int = SYNTHESIS_WORKING_RESOLUTION):
+    """Aspect-preserving resize of a PIL image so its longer side is
+    ``target`` pixels - keeps the diffusion pipeline operating near SD1.5's
+    native training resolution (see ``SYNTHESIS_WORKING_RESOLUTION`` above).
+    Pure PIL operation - unit-testable without any ML model."""
+    from PIL import Image as PILImage
+
+    w, h = image.size
+    if max(w, h) <= target:
+        return image
+    scale = target / max(w, h)
+    new_size = (max(1, round(w * scale)), max(1, round(h * scale)))
+    return image.resize(new_size, PILImage.LANCZOS)
+
 
 
 def _quality_of(c: Candidate) -> float:
@@ -366,7 +395,7 @@ def run_synthesis_stage(
 
         prompt = build_synthesis_prompt(category)
         strength = effective_synthesis_strength(category, cfg.synthesis_strength)
-        base_image = Image.open(base_path).convert("RGB")
+        base_image = resize_for_synthesis(Image.open(base_path).convert("RGB"))
         cat_dir = ensure_dir(synth_dir / category)
 
         for i in range(max(1, cfg.synthesis_count)):

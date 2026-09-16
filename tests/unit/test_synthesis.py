@@ -1,13 +1,16 @@
 """Synthesis stage - pure logic (missing-category detection, base-image
 selection, prompt building) - no ML models needed for these tests."""
 import pytest
+from PIL import Image
 
 from frpm.synthesis import (
     CATEGORY_SPEC,
     POSE_ADJACENCY,
+    SYNTHESIS_WORKING_RESOLUTION,
     build_synthesis_prompt,
     identify_missing_categories,
     pick_base_candidate,
+    resize_for_synthesis,
 )
 
 
@@ -129,3 +132,35 @@ def test_effective_strength_has_a_floor():
     from frpm.synthesis import effective_synthesis_strength
 
     assert effective_synthesis_strength("front_neutral", 0.0) >= 0.05
+
+
+def test_resize_for_synthesis_downscales_large_square_image():
+    img = Image.new("RGB", (1024, 1024))
+    resized = resize_for_synthesis(img)
+    assert max(resized.size) == SYNTHESIS_WORKING_RESOLUTION
+    assert resized.size == (SYNTHESIS_WORKING_RESOLUTION, SYNTHESIS_WORKING_RESOLUTION)
+
+
+def test_resize_for_synthesis_preserves_aspect_ratio():
+    img = Image.new("RGB", (1024, 768))  # 4:3
+    resized = resize_for_synthesis(img)
+    assert max(resized.size) == SYNTHESIS_WORKING_RESOLUTION
+    assert resized.size[0] / resized.size[1] == pytest.approx(1024 / 768, rel=1e-2)
+
+
+def test_resize_for_synthesis_leaves_small_images_unchanged():
+    img = Image.new("RGB", (256, 256))
+    resized = resize_for_synthesis(img)
+    assert resized.size == (256, 256)
+
+
+def test_resize_for_synthesis_leaves_exact_target_size_unchanged():
+    img = Image.new("RGB", (SYNTHESIS_WORKING_RESOLUTION, SYNTHESIS_WORKING_RESOLUTION))
+    resized = resize_for_synthesis(img)
+    assert resized.size == (SYNTHESIS_WORKING_RESOLUTION, SYNTHESIS_WORKING_RESOLUTION)
+
+
+def test_resize_for_synthesis_respects_custom_target():
+    img = Image.new("RGB", (1024, 1024))
+    resized = resize_for_synthesis(img, target=256)
+    assert resized.size == (256, 256)
