@@ -28,6 +28,7 @@ from . import expressions as expr_mod
 from . import identity as identity_mod
 from . import pose as pose_mod
 from . import selector as selector_mod
+from . import synthesis as synthesis_mod
 from .body import BodyPoseDetector, classify_body_visibility
 from .captions import build_caption
 from .config import AppConfig
@@ -446,6 +447,20 @@ class Pipeline:
                 captions[img_rec.file] = build_caption(cand, cfg.trigger_token, src_img)
             lora_files = write_lora_dataset(images, captions, out_dir, source_paths_by_file)
 
+        synthesized_records: list = []
+        if cfg.synthesize_missing:
+            try:
+                synthesized_records = synthesis_mod.run_synthesis_stage(
+                    deduped, cfg, out_dir,
+                    ensure_base_image_path=lambda c: self._ensure_face_crop_path(c, faces_dir, out_dir, generated),
+                )
+            except ImportError as exc:
+                logger.warning(
+                    "--synthesize-missing requires the 'generate' extra (pip install -e \".[generate]\") - %s", exc
+                )
+            except Exception as exc:
+                logger.warning("Synthesis stage failed (%s) - continuing without synthesized images.", exc)
+
         manifest = build_manifest(
             video=video_meta,
             identity_cluster_id=chosen_cluster,
@@ -459,6 +474,7 @@ class Pipeline:
             # out_dir-relative (e.g. "selected/faces/xxx.jpg") - do not re-prefix.
             reference_pack=reference_pack_files,
             lora_dataset=[str(Path(f).relative_to(out_dir)).replace("\\", "/") for f in lora_files],
+            synthesized_images=synthesized_records,
         )
         write_manifest(manifest, out_dir)
 
@@ -486,6 +502,27 @@ class Pipeline:
             if g and Path(g["face"]).name == name:
                 return cid
         return None
+
+    @staticmethod
+    def _ensure_face_crop_path(c: Candidate, faces_dir: Path, out_dir: Path, generated: dict) -> Optional[str]:
+        """Returns the absolute on-disk path to ``c``'s face crop, reusing
+        one already generated for the real selected/reference pack, or
+        creating it on demand otherwise (used by the synthesis stage, which
+        may need a base image for a candidate that isn't part of the real
+        pack itself)."""
+        g = generated.get(c.candidate_id)
+        if g and g.get("face"):
+            return str(out_dir / g["face"])
+        img = imread_unicode(c.frame_path)
+        if img is None:
+            return None
+        stem = f"frame_{c.frame_number:08d}_{c.candidate_id[-8:]}"
+        face_crop = make_face_crop(img, c.bbox)
+        face_path = faces_dir / f"{stem}.jpg"
+        imwrite_unicode(face_path, face_crop)
+        rel_face = str(face_path.relative_to(out_dir)).replace("\\", "/")
+        generated.setdefault(c.candidate_id, {})["face"] = rel_face
+        return str(face_path)
 
     def _build_final_contact_sheets(self, images, generated, by_id, union_ids, out_dir: Path) -> dict[str, str]:
         sheets_dir = ensure_dir(out_dir / "contact_sheets")

@@ -63,6 +63,7 @@ generate = [
     "transformers>=4.38.0",
     "accelerate>=0.28.0",
     "safetensors>=0.4.2",
+    "gfpgan>=1.3.8",
 ]
 
 [project.scripts]

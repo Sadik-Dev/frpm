@@ -138,6 +138,19 @@ class SelectedImageRecord(BaseModel):
     original: Optional[str] = None
 
 
+class SyntheticImageRecord(BaseModel):
+    """A record for an AI-recreated (not extracted-from-video) image,
+    always kept in a separate ``synthesized_images`` manifest list from
+    real ``images`` so real and generated content are never conflated."""
+
+    file: str
+    category: str
+    source_real_image: str
+    prompt: str
+    method: str
+    is_synthetic: bool = True
+
+
 class Manifest(BaseModel):
     video: VideoMetadata
     identity_cluster_id: int
@@ -149,6 +162,7 @@ class Manifest(BaseModel):
     images: list[SelectedImageRecord] = Field(default_factory=list)
     reference_pack: list[str] = Field(default_factory=list)
     lora_dataset: list[str] = Field(default_factory=list)
+    synthesized_images: list[SyntheticImageRecord] = Field(default_factory=list)
     quality_distribution: dict[str, int] = Field(default_factory=dict)
     expression_distribution: dict[str, int] = Field(default_factory=dict)
     pose_distribution: dict[str, int] = Field(default_factory=dict)

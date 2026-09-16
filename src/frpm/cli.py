@@ -64,6 +64,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--lora-mode", action="store_true", help="Also generate a lora_dataset/ with matching .txt caption files")
     p.add_argument("--trigger-token", default=DEFAULT_TRIGGER_TOKEN, help=f"Unique LoRA trigger token (default: {DEFAULT_TRIGGER_TOKEN})")
 
+    p.add_argument(
+        "--synthesize-missing", action="store_true",
+        help="Recreate realistic images for pose/expression categories the source video didn't capture "
+        "(img2img + IP-Adapter Plus Face, seeded from the person's own best real photo). "
+        "Requires the 'generate' extra: pip install -e \".[generate]\"",
+    )
+    p.add_argument("--synthesis-count", type=int, default=1, help="How many images to synthesize per missing category (default: 1)")
+    p.add_argument("--synthesis-strength", type=float, default=0.6, help="img2img denoising strength, 0-1 (default: 0.6; higher = more change from the base photo)")
+    p.add_argument("--synthesis-max-categories", type=int, default=6, help="Cap on how many missing categories to synthesize per run, to bound CPU time (default: 6)")
+    p.add_argument("--face-restore", action="store_true", help="Apply a GFPGAN face-restoration pass to synthesized images for extra sharpness/realism")
+
     report_group = p.add_mutually_exclusive_group()
     report_group.add_argument("--generate-report", dest="generate_report", action="store_true", default=True, help="Generate report.html (default: on)")
     report_group.add_argument("--no-report", dest="generate_report", action="store_false", help="Skip report.html generation")
@@ -126,6 +137,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         keep_candidates=args.keep_candidates,
         lora_mode=args.lora_mode,
         trigger_token=args.trigger_token,
+        synthesize_missing=args.synthesize_missing,
+        synthesis_count=args.synthesis_count,
+        synthesis_strength=args.synthesis_strength,
+        synthesis_max_categories=args.synthesis_max_categories,
+        face_restore=args.face_restore,
         generate_report=args.generate_report,
         device=args.device,
         resume=args.resume,
@@ -157,6 +173,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     console.print(f"  Reference pack: {len(manifest.reference_pack)}")
     if manifest.lora_dataset:
         console.print(f"  LoRA dataset: {len(manifest.lora_dataset)} images")
+    if manifest.synthesized_images:
+        console.print(f"  Synthesized (AI-recreated) images: {len(manifest.synthesized_images)}")
     console.print(f"  Manifest: {out_dir / 'manifest.json'}")
     if report_path:
         console.print(f"  Report: {report_path}")

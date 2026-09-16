@@ -4,10 +4,11 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from pathlib import Path
+from typing import Optional
 
 from jinja2 import BaseLoader, Environment, select_autoescape
 
-from .models import Manifest, SelectedImageRecord, VideoMetadata
+from .models import Manifest, SelectedImageRecord, SyntheticImageRecord, VideoMetadata
 from .utils import ensure_dir, write_json
 
 logger = logging.getLogger("frpm.report")
@@ -24,6 +25,7 @@ def build_manifest(
     images: list[SelectedImageRecord],
     reference_pack: list[str],
     lora_dataset: list[str],
+    synthesized_images: Optional[list[SyntheticImageRecord]] = None,
 ) -> Manifest:
     quality_dist: Counter = Counter()
     for img in images:
@@ -43,6 +45,7 @@ def build_manifest(
         images=images,
         reference_pack=reference_pack,
         lora_dataset=lora_dataset,
+        synthesized_images=synthesized_images or [],
         quality_distribution=dict(sorted(quality_dist.items())),
         expression_distribution=dict(expr_dist.most_common()),
         pose_distribution=dict(pose_dist.most_common()),
@@ -83,6 +86,8 @@ _REPORT_TEMPLATE = r"""<!doctype html>
   figcaption { padding:8px 10px; font-size:11.5px; color:#b7bcc4; }
   .sheet img { max-width:100%; border-radius:10px; margin: 10px 0; display:block; }
   .empty { color:#777; font-style: italic; }
+  .synthetic-badge { display:inline-block; background:#5b3aa8; color:#fff; font-size:10.5px; font-weight:700; padding:2px 8px; border-radius:999px; margin-bottom:6px; letter-spacing:.03em; }
+  .synthetic-note { color:#b39ddb; font-size:13px; margin-top:-8px; margin-bottom:18px; }
   footer { color:#666; margin-top:56px; font-size:12px; }
 </style>
 </head>
@@ -103,6 +108,7 @@ _REPORT_TEMPLATE = r"""<!doctype html>
     <div class="stat"><div class="num">{{ m.candidates_after_dedup }}</div><div class="label">After dedup</div></div>
     <div class="stat"><div class="num">{{ m.images|length }}</div><div class="label">Final images</div></div>
     <div class="stat"><div class="num">{{ m.reference_pack|length }}</div><div class="label">Reference pack</div></div>
+    {% if m.synthesized_images %}<div class="stat"><div class="num">{{ m.synthesized_images|length }}</div><div class="label">Synthesized</div></div>{% endif %}
   </div>
 
   <section>
@@ -155,6 +161,16 @@ _REPORT_TEMPLATE = r"""<!doctype html>
       {% for img in m.images if img.body_visibility != "none" %}<figure><img src="{{ img.original }}" loading="lazy"><figcaption>{{ img.body_visibility }}</figcaption></figure>{% else %}<p class="empty">No usable body references were found in this footage (close-up only, or framing too tight).</p>{% endfor %}
     </div>
   </section>
+
+  {% if m.synthesized_images %}
+  <section>
+    <h2>Synthesized Perspectives</h2>
+    <div class="synthetic-note">AI-recreated to fill pose/expression gaps the source video didn't capture - not extracted from the original footage. Each image is seeded from a real photo of this identity (shown as its source).</div>
+    <div class="grid">
+      {% for img in m.synthesized_images %}<figure><span class="synthetic-badge" style="margin:8px 8px 0">AI-GENERATED</span><img src="{{ img.file }}" loading="lazy"><figcaption>{{ img.category.replace("_", " ") }} &middot; based on {{ img.source_real_image }}</figcaption></figure>{% endfor %}
+    </div>
+  </section>
+  {% endif %}
 
   <footer>Generated entirely locally by FRPM - no images or data left this machine.</footer>
 </body>

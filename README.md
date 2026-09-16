@@ -27,6 +27,8 @@ Everything runs **100% locally**. No cloud APIs, no telemetry.
 - [Output structure](#output-structure)
 - [Models & licensing](#models--licensing)
 - [Resume / caching](#resume--caching)
+- [Optional: local image generation](#optional-local-image-generation-frpmgenerate)
+- [Synthesizing missing perspectives](#synthesizing-missing-perspectives---synthesize-missing)
 - [Testing](#testing)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
@@ -205,6 +207,8 @@ output/
     │   ├── poses.jpg                  # all head-angle buckets
     │   └── identity_candidate_*.jpg   # one per detected identity, for the selection prompt
     ├── lora_dataset/                  # only with --lora-mode: images + matching .txt captions
+    ├── synthesized/                    # only with --synthesize-missing: AI-recreated gap-filling images
+    │   └── <category>/synth_00.jpg     # e.g. left_profile/, laughing/ - grouped by the missing category filled
     ├── manifest.json                  # full metadata for every selected image
     └── report.html                    # open this in a browser
 ```
@@ -242,6 +246,9 @@ and easy to install on Windows:
 | Body pose | **MediaPipe Pose Landmarker** | Apache-2.0 |
 | Clustering | scikit-learn | BSD-3-Clause |
 | Perceptual hashing | ImageHash | BSD-2-Clause |
+| Image generation (optional, `generate` extra) | Stable Diffusion 1.5 | CreativeML OpenRAIL-M |
+| Identity conditioning (optional, `generate` extra) | IP-Adapter Plus Face | Apache-2.0 |
+| Face restoration (optional, `--face-restore`) | GFPGAN | Apache-2.0 |
 
 **InsightFace was deliberately not used**: its pretrained model-zoo weights
 are licensed "non-commercial research purposes only", which conflicts with
@@ -250,6 +257,11 @@ also avoided — not for licensing (it's fine, Boost-1.0), but because it has
 no official prebuilt wheels for recent Python on Windows and requires a C++
 build toolchain. All models above install from prebuilt PyPI wheels and are
 downloaded automatically (from their official sources) on first run.
+Likewise, **InstantID / PuLID / IP-Adapter-FaceID and CodeFormer were
+considered and not used** for the same reason - see
+[Optional: local image generation](#optional-local-image-generation-frpmgenerate)
+and [Synthesizing missing perspectives](#synthesizing-missing-perspectives---synthesize-missing)
+for details.
 
 ## Hardware / CPU vs GPU
 
@@ -305,6 +317,69 @@ Notes:
   tightly but can suppress prompt adherence for scene/clothing/lighting
   details not present in the face crop; lower gives the text prompt more
   control at some cost to identity fidelity.
+
+## Synthesizing missing perspectives (`--synthesize-missing`)
+
+Real footage doesn't always capture every useful angle - a talking-head
+video might never show a clean profile shot, or never catch the person
+laughing. `--synthesize-missing` fills those specific gaps by recreating a
+realistic image for each pose/expression category (from the same set the
+diversity selector targets - see [Diversity selection](#how-it-works))
+that has no good real match:
+
+```bash
+pip install -e ".[generate]"
+python main.py "URL" --synthesize-missing --synthesis-count 1 --face-restore
+```
+
+How it works: for each missing category, the best *real* photo of the
+identified person is picked as an img2img base (preferring the real pose
+closest to the target - e.g. a real three-quarter shot as the base for a
+missing profile shot) and processed with Stable Diffusion 1.5 img2img +
+IP-Adapter Plus Face, seeded from that same photo for identity. Starting
+from a real photo (rather than pure noise) keeps skin tone, hair, and
+lighting far more consistent than plain text-to-image. An optional GFPGAN
+(Apache-2.0) face-restoration pass (`--face-restore`) sharpens the result
+further.
+
+Output goes to `synthesized/<category>/` and a separate
+`synthesized_images` list in `manifest.json` - **never mixed into**
+`images`/`reference_pack`/`lora_dataset`, and clearly labeled "AI-recreated"
+in `report.html`. Real and synthesized content should never be
+indistinguishable in the output.
+
+Flags:
+* `--synthesis-count N` - images per missing category (default: 1)
+* `--synthesis-strength F` - base img2img denoising strength, 0-1 (default:
+  0.6; automatically boosted per-category for larger pose changes - see
+  limitation note below - and capped at 0.75)
+* `--synthesis-max-categories N` - cap on how many missing categories to
+  synthesize per run, to bound CPU time on videos with many gaps (default: 6)
+* `--face-restore` - apply the optional GFPGAN pass
+
+**Known limitation - pose changes are a nudge, not a guarantee.** This
+uses text-prompt guidance only, with no pose/skeleton conditioning
+(ControlNet). During development this was verified empirically: a large
+pose change (e.g. recreating a profile view from a front-facing photo)
+only partially rotates the face at safe strength settings, and pushing
+strength higher to force it further was also verified to make the *base
+SD1.5 model's own training biases* dominate over both the source photo and
+the identity conditioning - in one test this produced content completely
+unrelated to the input photo. `_STRENGTH_ADJUSTMENT` and
+`MAX_SYNTHESIS_STRENGTH` in `src/frpm/synthesis.py` are deliberately capped
+conservatively as a result. Precise pose control would require ControlNet
+with pose/landmark conditioning, which is not currently implemented (see
+`src/frpm/synthesis.py`'s module docstring for why, and consider it a
+natural next contribution).
+
+**GFPGAN compatibility note:** GFPGAN's dependency `basicsr` imports a
+module that modern `torchvision` versions removed. FRPM applies a small,
+inert-if-unneeded compatibility shim automatically (see
+`_patch_torchvision_functional_tensor` in `src/frpm/synthesis.py`) so
+`--face-restore` works without needing to pin an old torchvision.
+**CodeFormer** was considered as an alternative restoration model but is
+licensed "non-commercial purposes only" (S-Lab License 1.0) and was
+therefore not used, consistent with FRPM's licensing stance throughout.
 
 ## Testing
 
