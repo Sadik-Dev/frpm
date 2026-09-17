@@ -1,17 +1,25 @@
 """Synthesize missing perspectives of the identified person.
 
 Upgrades pack *construction* itself: after the normal real-frame pipeline
-selects the best real candidates, this optional stage looks for pose /
-expression categories (from ``selector.TARGET_CATEGORIES``) that the source
-footage simply never captured well - e.g. no clean profile shot, no
-laughing frame - and recreates a highly realistic image for each gap.
+selects the best real candidates, this optional stage recreates a highly
+realistic image for each pose/expression category in
+``selector.TARGET_CATEGORIES``. Two modes control which categories are
+processed:
+
+* ``missing`` (default) - only categories the source footage never
+  captured well (e.g. no clean profile shot, no laughing frame).
+* ``full`` - every target category, regardless of whether real footage
+  already covers it, for a complete AI-reconstructed multi-perspective
+  identity set (front/three-quarter/profile x neutral/smile/serious, plus
+  laughing/talking/focused/confident etc.) seeded entirely from the
+  person's own real photos.
 
 Realism strategy: rather than generating from pure noise (a text-to-image
 prompt alone), this uses **img2img** seeded from the person's own best-fit
 *real* photo, combined with IP-Adapter Plus Face for identity conditioning
 on that same photo. Starting from a real frame keeps skin tone, hair, and
 general lighting continuity intact, and the (moderate, tunable) denoising
-strength pushes the pose/expression toward the missing category without
+strength pushes the pose/expression toward the target category without
 discarding the real photo entirely - this reads as far more photorealistic
 and identity-consistent than pure txt2img.
 
@@ -23,10 +31,12 @@ conflated.
 
 Licensing: reuses ``generate.py``'s model choices (SD1.5 - CreativeML
 OpenRAIL-M; IP-Adapter Plus Face - Apache-2.0), plus an optional GFPGAN
-(Apache-2.0, TencentARC) face-restoration pass for extra sharpness/realism.
-CodeFormer was considered for the same restoration step but is licensed
-"non-commercial purposes only" (S-Lab License 1.0) and is therefore not
-used, consistent with FRPM's existing licensing stance.
+(Apache-2.0, TencentARC) face-restoration pass for extra sharpness/realism
+(also 2x-upscales the result, since GFPGAN's restoration network operates
+best when given upscaling headroom). CodeFormer was considered for the
+same restoration step but is licensed "non-commercial purposes only"
+(S-Lab License 1.0) and is therefore not used, consistent with FRPM's
+existing licensing stance.
 """
 from __future__ import annotations
 
@@ -42,6 +52,12 @@ from .selector import MIN_CATEGORY_QUALITY, TARGET_CATEGORIES
 from .utils import ensure_dir
 
 logger = logging.getLogger("frpm.synthesis")
+
+# Every category name the diversity selector targets, in the same order -
+# used by "full" reconstruction mode to synthesize the complete set
+# regardless of real coverage.
+ALL_CATEGORY_NAMES: list[str] = [name for name, _ in TARGET_CATEGORIES]
+
 
 # Explicit (pose_bucket_or_None, expression_tags) spec per selector.py
 # category name - mirrors TARGET_CATEGORIES' own matcher definitions so the
@@ -191,6 +207,37 @@ def identify_missing_categories(
     return missing
 
 
+def select_categories_to_synthesize(
+    candidates: list[Candidate], mode: str = "missing", min_quality: float = MIN_CATEGORY_QUALITY
+) -> list[str]:
+    """Decides which categories a synthesis run should process.
+
+    ``mode="missing"`` (default): only gaps the real footage didn't cover -
+    see ``identify_missing_categories``.
+    ``mode="full"``: every category in ``ALL_CATEGORY_NAMES``, regardless
+    of existing real coverage - for a complete AI-reconstructed
+    multi-perspective identity set. Pure function, no ML - unit-testable.
+    """
+    if mode == "full":
+        return list(ALL_CATEGORY_NAMES)
+    return identify_missing_categories(candidates, min_quality=min_quality)
+
+
+def resolve_face_restore(explicit: Optional[bool], mode: str) -> bool:
+    """Decides the effective face-restoration setting.
+
+    An explicit ``--face-restore``/``--no-face-restore`` always wins. With
+    neither given (``explicit=None``), face restoration is enabled
+    automatically for ``mode="full"`` (a complete reconstruction pack
+    benefits from the extra sharpness/realism by default) and left off for
+    ``mode="missing"`` (matching prior default behavior). Pure function -
+    unit-testable.
+    """
+    if explicit is not None:
+        return explicit
+    return mode == "full"
+
+
 def pick_base_candidate(candidates: list[Candidate], category: str) -> Optional[Candidate]:
     """Picks the best real candidate to use as the img2img/identity base
     image for recreating ``category``, preferring poses visually closest to
@@ -262,6 +309,14 @@ class _SynthesisPipeline:
     Face pipeline, so synthesizing several missing categories in one run
     only pays the (~seconds-to-minutes) model-loading cost once."""
 
+    # GFPGAN's restoration network was trained to also upscale by 2x, and
+    # produces sharper output when allowed to do so rather than being
+    # forced back down to the original (already-downscaled-to-512, see
+    # SYNTHESIS_WORKING_RESOLUTION) size. Background pixels are upscaled
+    # with a plain resize (bg_upsampler=None keeps that cheap); only the
+    # detected face region gets GFPGAN's actual restoration network.
+    FACE_RESTORE_UPSCALE = 2
+
     def __init__(self, ip_adapter_scale: float = 0.7):
         import torch
         from diffusers import DPMSolverMultistepScheduler, StableDiffusionImg2ImgPipeline
@@ -295,7 +350,8 @@ class _SynthesisPipeline:
                 "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth"
             )
             self._face_restorer = GFPGANer(
-                model_path=model_url, upscale=1, arch="clean", channel_multiplier=2, bg_upsampler=None
+                model_path=model_url, upscale=self.FACE_RESTORE_UPSCALE, arch="clean",
+                channel_multiplier=2, bg_upsampler=None,
             )
         except Exception as exc:
             logger.warning("Could not load GFPGAN face-restoration model (%s) - skipping restoration pass.", exc)
@@ -356,8 +412,9 @@ def run_synthesis_stage(
     out_dir: Path,
     ensure_base_image_path: Callable[[Candidate], Optional[str]],
 ) -> list[SyntheticImageRecord]:
-    """Finds missing categories, recreates up to ``cfg.synthesis_count``
-    images for each, and writes them under ``out_dir/synthesized/``.
+    """Selects categories per ``cfg.synthesis_mode`` (gaps only, or the
+    full target set), recreates up to ``cfg.synthesis_count`` images for
+    each, and writes them under ``out_dir/synthesized/``.
 
     ``ensure_base_image_path`` is a callback (provided by the pipeline)
     that returns the on-disk path to a candidate's face crop, generating it
@@ -366,24 +423,34 @@ def run_synthesis_stage(
     """
     from PIL import Image
 
-    missing = identify_missing_categories(candidates)
-    if not missing:
+    categories = select_categories_to_synthesize(candidates, cfg.synthesis_mode)
+    if not categories:
         logger.info("No missing pose/expression categories detected - nothing to synthesize.")
         return []
-    if len(missing) > cfg.synthesis_max_categories:
+
+    if cfg.synthesis_mode == "full":
         logger.info(
-            "%d categories are missing; capping synthesis to the first %d (--synthesis-max-categories) "
-            "to bound CPU time. Skipped: %s",
-            len(missing), cfg.synthesis_max_categories, ", ".join(missing[cfg.synthesis_max_categories:]),
+            "Full reconstruction mode: recreating all %d target perspectives "
+            "(front/three-quarter/profile x expressions), regardless of existing real coverage.",
+            len(categories),
         )
-        missing = missing[: cfg.synthesis_max_categories]
-    logger.info("Synthesizing %d missing categories: %s", len(missing), ", ".join(missing))
+    else:
+        logger.info("%d categories missing from real footage - synthesizing to fill the gaps.", len(categories))
+
+    if len(categories) > cfg.synthesis_max_categories:
+        logger.info(
+            "%d categories selected; capping synthesis to the first %d (--synthesis-max-categories) "
+            "to bound CPU time. Skipped: %s",
+            len(categories), cfg.synthesis_max_categories, ", ".join(categories[cfg.synthesis_max_categories:]),
+        )
+        categories = categories[: cfg.synthesis_max_categories]
+    logger.info("Synthesizing %d categories: %s", len(categories), ", ".join(categories))
 
     synth_dir = ensure_dir(out_dir / "synthesized")
     pipeline = _SynthesisPipeline(ip_adapter_scale=cfg.synthesis_ip_adapter_scale)
 
     records: list[SyntheticImageRecord] = []
-    for category in missing:
+    for category in categories:
         base = pick_base_candidate(candidates, category)
         if base is None:
             logger.warning("No usable real candidate found to base '%s' on - skipping.", category)
@@ -400,7 +467,10 @@ def run_synthesis_stage(
 
         for i in range(max(1, cfg.synthesis_count)):
             out_path = cat_dir / f"synth_{i:02d}.jpg"
-            logger.info("Synthesizing '%s' (%d/%d, strength=%.2f)...", category, i + 1, cfg.synthesis_count, strength)
+            logger.info(
+                "Synthesizing '%s' (%d/%d, strength=%.2f, steps=%d)...",
+                category, i + 1, cfg.synthesis_count, strength, cfg.synthesis_steps,
+            )
             start = time.time()
             try:
                 image = pipeline.synthesize(
@@ -408,7 +478,7 @@ def run_synthesis_stage(
                     prompt=prompt,
                     negative_prompt=DEFAULT_NEGATIVE_PROMPT,
                     strength=strength,
-                    steps=28,
+                    steps=cfg.synthesis_steps,
                     guidance_scale=7.0,
                     seed=None,
                     apply_face_restore=cfg.face_restore,

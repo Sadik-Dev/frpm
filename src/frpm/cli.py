@@ -26,6 +26,7 @@ from .errors import FRPMError
 from .hardware import detect_hardware
 from .models import IdentityClusterInfo
 from .pipeline import Pipeline
+from .synthesis import ALL_CATEGORY_NAMES, resolve_face_restore
 from .utils import setup_logging
 
 console = Console()
@@ -66,14 +67,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p.add_argument(
         "--synthesize-missing", action="store_true",
-        help="Recreate realistic images for pose/expression categories the source video didn't capture "
-        "(img2img + IP-Adapter Plus Face, seeded from the person's own best real photo). "
+        help="Recreate realistic images of the identified person for different pose/expression "
+        "perspectives (img2img + IP-Adapter Plus Face, seeded from the person's own best real "
+        "photo). See --synthesis-mode to control which categories are (re)generated. "
         "Requires the 'generate' extra: pip install -e \".[generate]\"",
     )
-    p.add_argument("--synthesis-count", type=int, default=1, help="How many images to synthesize per missing category (default: 1)")
+    p.add_argument(
+        "--synthesis-mode", choices=["missing", "full"], default="missing",
+        help="'missing' (default): only recreate pose/expression categories the source video didn't "
+        "capture well. 'full': recreate EVERY target perspective (front/three-quarter/profile x "
+        "neutral/smile/serious, laughing, talking, focused, confident, etc.) regardless of whether "
+        "real footage already covers it - a complete AI-reconstructed multi-perspective character set.",
+    )
+    p.add_argument("--synthesis-count", type=int, default=1, help="How many images to synthesize per category (default: 1)")
     p.add_argument("--synthesis-strength", type=float, default=0.6, help="img2img denoising strength, 0-1 (default: 0.6; higher = more change from the base photo)")
-    p.add_argument("--synthesis-max-categories", type=int, default=6, help="Cap on how many missing categories to synthesize per run, to bound CPU time (default: 6)")
-    p.add_argument("--face-restore", action="store_true", help="Apply a GFPGAN face-restoration pass to synthesized images for extra sharpness/realism")
+    p.add_argument("--synthesis-steps", type=int, default=30, help="Diffusion steps per synthesized image - higher is generally sharper/more realistic but slower (default: 30)")
+    p.add_argument(
+        "--synthesis-max-categories", type=int, default=None,
+        help="Cap on how many categories to synthesize per run, to bound CPU time. Default: 6 for "
+        "--synthesis-mode missing, or all target categories (no cap) for --synthesis-mode full",
+    )
+
+    face_restore_group = p.add_mutually_exclusive_group()
+    face_restore_group.add_argument(
+        "--face-restore", dest="face_restore", action="store_true", default=None,
+        help="Apply a GFPGAN face-restoration + 2x upscale pass to synthesized images for extra "
+        "sharpness/realism (automatically enabled by default for --synthesis-mode full)",
+    )
+    face_restore_group.add_argument(
+        "--no-face-restore", dest="face_restore", action="store_false",
+        help="Disable the GFPGAN face-restoration pass even in --synthesis-mode full",
+    )
 
     report_group = p.add_mutually_exclusive_group()
     report_group.add_argument("--generate-report", dest="generate_report", action="store_true", default=True, help="Generate report.html (default: on)")
@@ -121,6 +145,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
     setup_logging(args.log_level)
 
+    # Tri-state flags resolved here (rather than as argparse defaults) so
+    # "not explicitly set by the user" can trigger mode-aware behavior:
+    # --synthesis-mode full gets a higher category cap and face-restore
+    # enabled by default, without silently overriding an explicit user choice.
+    face_restore = resolve_face_restore(args.face_restore, args.synthesis_mode)
+    if args.synthesis_max_categories is not None:
+        synthesis_max_categories = args.synthesis_max_categories
+    elif args.synthesis_mode == "full":
+        synthesis_max_categories = len(ALL_CATEGORY_NAMES)
+    else:
+        synthesis_max_categories = 6
+
     cfg = AppConfig(
         url=args.url,
         output_dir=Path(args.output),
@@ -138,10 +174,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         lora_mode=args.lora_mode,
         trigger_token=args.trigger_token,
         synthesize_missing=args.synthesize_missing,
+        synthesis_mode=args.synthesis_mode,
         synthesis_count=args.synthesis_count,
         synthesis_strength=args.synthesis_strength,
-        synthesis_max_categories=args.synthesis_max_categories,
-        face_restore=args.face_restore,
+        synthesis_steps=args.synthesis_steps,
+        synthesis_max_categories=synthesis_max_categories,
+        face_restore=face_restore,
         generate_report=args.generate_report,
         device=args.device,
         resume=args.resume,

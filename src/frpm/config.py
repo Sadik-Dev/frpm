@@ -100,10 +100,12 @@ class AppConfig:
     min_quality: float = 0.0
 
     synthesize_missing: bool = False
+    synthesis_mode: str = "missing"
     synthesis_count: int = 1
     synthesis_strength: float = 0.6
     synthesis_ip_adapter_scale: float = 0.7
     synthesis_max_categories: int = 6
+    synthesis_steps: int = 30
     face_restore: bool = False
 
     quality_weights: QualityWeights = field(default_factory=QualityWeights)

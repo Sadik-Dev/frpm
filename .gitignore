@@ -5,6 +5,10 @@ __pycache__/
 output/
 models_cache/
 reference_images/
+# facexlib (a GFPGAN dependency) caches face-detection/parsing model
+# weights here, relative to cwd, when --face-restore / --synthesis-mode
+# full is used - a runtime cache, never a source artifact.
+gfpgan/
 *.egg-info/
 build/
 dist/

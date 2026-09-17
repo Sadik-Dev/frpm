@@ -4,6 +4,7 @@ import pytest
 from PIL import Image
 
 from frpm.synthesis import (
+    ALL_CATEGORY_NAMES,
     CATEGORY_SPEC,
     POSE_ADJACENCY,
     SYNTHESIS_WORKING_RESOLUTION,
@@ -11,6 +12,8 @@ from frpm.synthesis import (
     identify_missing_categories,
     pick_base_candidate,
     resize_for_synthesis,
+    resolve_face_restore,
+    select_categories_to_synthesize,
 )
 
 
@@ -164,3 +167,57 @@ def test_resize_for_synthesis_respects_custom_target():
     img = Image.new("RGB", (1024, 1024))
     resized = resize_for_synthesis(img, target=256)
     assert resized.size == (256, 256)
+
+
+# --- full reconstruction mode ---------------------------------------------
+
+def test_all_category_names_matches_target_categories_count():
+    from frpm.selector import TARGET_CATEGORIES
+
+    assert len(ALL_CATEGORY_NAMES) == len(TARGET_CATEGORIES)
+    assert set(ALL_CATEGORY_NAMES) == {name for name, _ in TARGET_CATEGORIES}
+
+
+def test_select_categories_full_mode_returns_everything_even_with_full_real_coverage(candidate_factory):
+    # Build a candidate for every single category so "missing" mode would
+    # return nothing - "full" mode must still return everything.
+    candidates = []
+    for name, (pose_key, expr_tags) in CATEGORY_SPEC.items():
+        candidates.append(candidate_factory(
+            f"c_{name}", pose=pose_key or "front", expressions=expr_tags or ["neutral"], quality=0.95,
+        ))
+    selected = select_categories_to_synthesize(candidates, mode="full")
+    assert selected == ALL_CATEGORY_NAMES
+
+
+def test_select_categories_full_mode_ignores_empty_candidates():
+    selected = select_categories_to_synthesize([], mode="full")
+    assert selected == ALL_CATEGORY_NAMES
+
+
+def test_select_categories_missing_mode_matches_identify_missing_categories(candidate_factory):
+    candidates = [candidate_factory("a", pose="front", expressions=["neutral"], quality=0.9)]
+    assert select_categories_to_synthesize(candidates, mode="missing") == identify_missing_categories(candidates)
+
+
+def test_select_categories_defaults_to_missing_mode(candidate_factory):
+    candidates = [candidate_factory("a", pose="front", expressions=["neutral"], quality=0.9)]
+    assert select_categories_to_synthesize(candidates) == identify_missing_categories(candidates)
+
+
+def test_resolve_face_restore_explicit_true_wins_regardless_of_mode():
+    assert resolve_face_restore(True, "missing") is True
+    assert resolve_face_restore(True, "full") is True
+
+
+def test_resolve_face_restore_explicit_false_wins_regardless_of_mode():
+    assert resolve_face_restore(False, "missing") is False
+    assert resolve_face_restore(False, "full") is False
+
+
+def test_resolve_face_restore_defaults_on_for_full_mode():
+    assert resolve_face_restore(None, "full") is True
+
+
+def test_resolve_face_restore_defaults_off_for_missing_mode():
+    assert resolve_face_restore(None, "missing") is False
